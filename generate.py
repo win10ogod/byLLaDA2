@@ -7,7 +7,7 @@ import torch
 import argparse
 from contextlib import nullcontext
 from typing import List, Optional
-
+import torch.nn.functional as F
 from model import ModelArgs, LLaDA
 from tokenizer import ByteLevelTokenizer
 from config import get_model_config, MODEL_CONFIGS
@@ -90,26 +90,44 @@ def generate_text(
     num_return_sequences: int = 1,
     ctx: nullcontext = nullcontext(),
 ) -> List[str]:
-    """Generate text from prompt"""
+    """Generate text from prompt using diffusion process"""
     # Encode prompt
-    input_ids = tokenizer.encode(prompt)
-    input_ids = torch.tensor(input_ids).unsqueeze(0).to(model.device)
+    prompt_ids = tokenizer.encode(prompt)
+    prompt_ids = torch.tensor(prompt_ids).unsqueeze(0).to(model.device)
     
     # Generate multiple sequences
     generated_sequences = []
     
     for _ in range(num_return_sequences):
         with torch.no_grad(), ctx:
-            # Generate
-            output_ids = model.generate(
-                input_ids,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_k=top_k
-            )
+            # Start with fully masked sequence
+            masked_ids = torch.full((1, max_new_tokens), 
+                                  model.tok_embeddings.weight.shape[0] - 1,  # Mask token
+                                  device=model.device)
             
-            # Decode
-            generated_text = tokenizer.decode(output_ids[0].tolist())
+            # Concatenate prompt and masked sequence
+            input_ids = torch.cat([prompt_ids, masked_ids], dim=1)
+            
+            # Diffusion generation process
+            for t in torch.linspace(1, 0, max_new_tokens, device=model.device):
+                # Predict all tokens
+                logits = model(input_ids)
+                
+                # Apply temperature and top-k filtering
+                logits = logits[:, -max_new_tokens:] / temperature
+                if top_k is not None:
+                    v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                    logits[logits < v[:, [-1]]] = float('-inf')
+                
+                # Sample next tokens
+                probs = F.softmax(logits, dim=-1)
+                next_tokens = torch.multinomial(probs, num_samples=1)
+                
+                # Update input_ids with predicted tokens
+                input_ids[:, -max_new_tokens:] = next_tokens
+            
+            # Decode generated sequence
+            generated_text = tokenizer.decode(input_ids[0, len(prompt_ids[0]):].tolist())
             generated_sequences.append(generated_text)
     
     return generated_sequences

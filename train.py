@@ -187,9 +187,17 @@ def train():
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
             
-            # Forward pass
+            # Apply random masking
+            t = torch.rand(input_ids.size(0), device=input_ids.device)  # Random mask ratio for each sample
+            mask = torch.bernoulli(t.unsqueeze(1).expand_as(input_ids))  # Create mask
+            
+            # Mask input tokens
+            masked_input = input_ids.clone()
+            masked_input[mask.bool()] = model.tok_embeddings.weight.shape[0] - 1  # Use last token as mask token
+            
+            # Forward pass with masked input
             with ctx:
-                logits = model(input_ids, labels)
+                logits = model(masked_input, labels)
                 loss = model.last_loss
                 loss = loss / train_config.grad_accumulation_steps
             

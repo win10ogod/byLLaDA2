@@ -1,6 +1,6 @@
 """
 LLaDA (Large Language Diffusion with Masking) Model Implementation
-Based on llama2.c with ByT5's byte-level encoding
+Based on masked diffusion modeling approach
 """
 
 import math
@@ -13,16 +13,16 @@ import torch.nn.functional as F
 
 @dataclass
 class ModelArgs:
-    dim: int = 4096  # Transformer dimension 
+    dim: int = 4096  # Transformer dimension
     n_layers: int = 32  # Number of layers
     n_heads: int = 32  # Number of attention heads
-    n_kv_heads: Optional[int] = None  # Number of key/value heads (can be < query heads because of multiquery)
     vocab_size: int = 256  # Using byte-level encoding (2^8)
     multiple_of: int = 256  # MLP hidden layer size will be multiple of this
-    hidden_dim: Optional[int] = None  # If None, defaults to 4x model dimension
     norm_eps: float = 1e-5  # Layer normalization epsilon
     max_seq_len: int = 2048  # Maximum sequence length
     dropout: float = 0.0  # Dropout rate
+    mask_ratio: float = 0.15  # Base ratio of tokens to mask
+    mask_schedule: str = 'cosine'  # Masking schedule type
 
 class RMSNorm(nn.Module):
     """Root Mean Square Layer Normalization"""
@@ -173,7 +173,7 @@ class DiffusionTransformerBlock(nn.Module):
 class LLaDA(nn.Module):
     """
     LLaDA: Large Language Diffusion with Masking
-    Combines diffusion-based training with byte-level modeling
+    Implements masked diffusion modeling for language
     """
     
     def __init__(self, args: ModelArgs):
@@ -186,6 +186,7 @@ class LLaDA(nn.Module):
         self.tok_embeddings = nn.Embedding(args.vocab_size, args.dim)
         self.dropout = nn.Dropout(args.dropout)
         
+        # Transformer layers without causal mask
         self.layers = torch.nn.ModuleList()
         for i in range(args.n_layers):
             self.layers.append(DiffusionTransformerBlock(i, args))
@@ -193,10 +194,9 @@ class LLaDA(nn.Module):
         self.norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.output = nn.Linear(args.dim, args.vocab_size, bias=False)
 
-        # Precompute frequences for rotary embeddings
-        freqs_cos, freqs_sin = precompute_freqs_cis(self.args.dim // self.args.n_heads, self.args.max_seq_len * 2)
-        self.register_buffer("freqs_cos", freqs_cos, persistent=False)
-        self.register_buffer("freqs_sin", freqs_sin, persistent=False)
+        # Masking parameters
+        self.mask_ratio = args.mask_ratio
+        self.mask_schedule = args.mask_schedule
 
         # Initialize weights
         self.apply(self._init_weights)
@@ -219,19 +219,25 @@ class LLaDA(nn.Module):
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
         h = self.dropout(h)
-        freqs_cos = self.freqs_cos[:seqlen]
-        freqs_sin = self.freqs_sin[:seqlen]
 
+        # Apply transformer layers
         for layer in self.layers:
-            h = layer(h, freqs_cos, freqs_sin)
-        h = self.norm(h)
+            h = layer(h)
 
+        h = self.norm(h)
+        
         if targets is not None:
+            # Compute loss only on masked tokens
             logits = self.output(h)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            mask = (targets != -1)  # -1 indicates padding
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), 
+                                 targets.view(-1), 
+                                 reduction='none')
+            loss = (loss * mask.view(-1)).sum() / mask.sum()
             self.last_loss = loss
         else:
-            logits = self.output(h[:, [-1], :])  # Only compute last logits during inference
+            # During inference, predict all tokens
+            logits = self.output(h)
             self.last_loss = None
 
         return logits

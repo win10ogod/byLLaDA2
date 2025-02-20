@@ -116,4 +116,3 @@ MIT License - see LICENSE file for details
 - Based on [llama2.c](https://github.com/karpathy/llama2.c)
 - Inspired by ByT5's byte-level processing
 - Built with PyTorch
-- https://arxiv.org/abs/2502.09992 (I am not the author of the paper. All credit goes to the author of the paper.)
