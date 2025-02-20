@@ -1,6 +1,6 @@
-torch>=2.0.0
-numpy>=1.23.5
-tqdm>=4.64.1
-wandb>=0.15.5
-pytest>=7.4.0
-requests>=2.31.0
+torch
+numpy
+tqdm
+wandb
+pytest
+requests
